@@ -219,3 +219,47 @@ ROCm understands raw memory and hardware execution.
 - Hardware: R9700 (gfx1201) is officially supported on ROCm 7.2+ and SGLang's ROCm build.
 - Model: use AWQ/INT4 quantization of Qwen3.6-27B, not FP8, until the AITER gfx1201 gap closes.
 - Architecture: the model's 3:1 DeltaNet-to-attention ratio is why it fits comfortably in 32GB at long context — most layers use fixed-size state instead of a growing KV cache.
+
+---
+
+## Appendix A — SGLang vs. other inference engines for this setup
+
+### Concurrency & caching model
+
+| Engine | Cache strategy | Concurrency model | Where it wins |
+|---|---|---|---|
+| **SGLang** | RadixAttention — trie-based prefix cache, aggressively shares KV across requests with a common prefix | True parallel batching | Agentic/RAG workloads, multi-turn chat, repeated system prompts — anything where requests share a prefix |
+| **vLLM** | PagedAttention — treats KV cache like OS virtual memory, no fragmentation | Continuous batching | Single-turn/unique-prompt throughput at high concurrency; broadest hardware support (NVIDIA, AMD, TPU, Trainium, Ascend) |
+| **llama.cpp** | Simple KV cache, no prefix sharing | Single-stream by default (`-np` for limited parallel slots) | Maximum portability — runs on ROCm, Vulkan, CPU, Metal; the widest GGUF quantization ecosystem |
+| **Ollama** | Wraps llama.cpp | Effectively sequential/time-sliced under concurrent load | Easiest single-user setup — `ollama run model`, nothing to configure |
+
+One benchmark on unique, non-overlapping prompts actually had vLLM edge out SGLang
+(60 vs 52.7 tok/s) — SGLang's advantage is conditional on shared context, not
+universal. On shared-prefix workloads SGLang has shown up to 4.6x the throughput of
+vLLM in concurrent tests, but that gap is workload-dependent, not a fixed multiplier.
+
+### AMD R9700 / gfx1201 support maturity
+
+- **SGLang**: officially supported via AMD's prebuilt ROCm image (as set up in this
+  doc). Straightforward, tracks upstream.
+- **vLLM**: gfx1201 supported as an official ROCm plugin target, actively maintained,
+  native Qwen3.6-27B support with `--reasoning-parser qwen3` (mirrors SGLang's flag).
+- **llama.cpp**: works on gfx1201 today, but field reports are mixed — one user had a
+  stable ROCm Docker setup running Qwen3.6-27B at full 262K context, then hit crashes
+  and core dumps after a routine update, and had to fall back toward Vulkan (which
+  itself warns it's "not a conformant Vulkan implementation, testing use only").
+  Expect more hands-on troubleshooting than with SGLang/vLLM.
+- **Ollama**: official ROCm v7 support lists gfx1201, but real-world Windows users
+  have found the gfx12xx ROCm libraries missing from the shipped installer and had
+  to pull community-built replacements (e.g. the `likelovewant/ollama-for-amd`
+  project) to get RDNA4 cards recognized. Linux tends to fare better than Windows
+  here.
+
+### Bottom line for this setup
+
+- **Multi-user or agentic serving** → stick with SGLang (what this doc covers) or
+  vLLM — both have first-class gfx1201 support and native Qwen3.6-27B integration.
+- **Single-user, want the simplest possible thing** → Ollama, if on Linux and willing
+  to accept the sequential-concurrency ceiling and rougher AMD-driver edges.
+- **Maximum quantization flexibility, don't mind some driver wrangling** →
+  llama.cpp/GGUF, but budget time for the AMD ROCm/Vulkan flakiness noted above.
